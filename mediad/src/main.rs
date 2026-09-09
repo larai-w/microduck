@@ -312,6 +312,14 @@ fn main() -> ExitCode {
             args.turn_url.clone(),
         ));
 
+        // What a control lane can say about this robot's own media: the picture's geometry, and
+        // the frame streamer. Empty until the pipeline is up — `sensor_mode()` is only truthful
+        // once something has tried to set it, and there are no frames to encode before then — and
+        // the relay below is spawned before that on purpose, so the answer has to be able to
+        // arrive late rather than be a value passed in now.
+        let (video_tx, video_rx) =
+            tokio::sync::watch::channel::<Option<mediad::session::Media>>(None);
+
         // The outward half of remote access, and it is deliberately *after* the producer is
         // learned: the name a client sees in the service's listing comes from the same place the
         // local `meta` gets it, and a relay that registered first would publish an unnamed robot
@@ -340,6 +348,7 @@ fn main() -> ExitCode {
                         tokio::spawn(
                             relay
                                 .with_local_signalling(format!("ws://127.0.0.1:{}", args.port))
+                                .with_video(video_rx.clone())
                                 .run(),
                         );
                     }
@@ -379,7 +388,7 @@ fn main() -> ExitCode {
         // `get_frame` surface in `architecture.md` §5.3 is what the rest of it is for. The branch
         // runs from the start rather than being added later, because a tee inserted into a live
         // pipeline is a different and much harder problem than a tee that was always there.
-        let (_pipeline, mut channels, frames) = match mediad::pipeline::start(
+        let (_pipeline, mut channels, frames, stream_branch) = match mediad::pipeline::start(
             source.clone(),
             &producer,
             &settings,
@@ -510,6 +519,52 @@ fn main() -> ExitCode {
             intrinsics,
         };
 
+        // Frames out to a WebSocket this robot dials, when something asks for them. Built here
+        // because it needs the tee — and given the same `turn` the detector's sampler gets, for
+        // the same reason: a pipeline that was asked to flip has already turned the frames, and
+        // turning them twice is a picture on its side with nothing to say why.
+        let streamer = std::sync::Arc::new(mediad::stream::Streamer::new(
+            mediad::stream::Encoders {
+                // The same `turn` the detector's sampler gets, and for the same reason: a pipeline
+                // asked to flip has already turned the frames, and turning them twice is a
+                // picture on its side with nothing to say why.
+                jpeg: mediad::stream::jpeg_encoder(
+                    frames.clone(),
+                    if args.flip_in_pipeline {
+                        duck_detect::Turn::None
+                    } else {
+                        turn
+                    },
+                ),
+                // The H.264 branch turns nothing: it is downstream of the same tee, so the flip —
+                // or its absence — is already in the pixels it encodes.
+                h264: stream_branch.clone().map(mediad::stream::h264_encoder),
+                gate: stream_branch.clone().map(|branch| {
+                    std::sync::Arc::new(move |open: bool| {
+                        if open {
+                            branch.open();
+                        } else {
+                            branch.close();
+                        }
+                    }) as std::sync::Arc<dyn Fn(bool) + Send + Sync>
+                }),
+            },
+            producer.clone(),
+            // The resolved mount angle, not the flag: `--rotate` is an `Option` now and the
+            // default lives in one place at the top of `main`.
+            rotate,
+            &args.token,
+        ));
+
+        let media = mediad::session::Media {
+            video: video.clone(),
+            streamer: std::sync::Arc::clone(&streamer),
+        };
+
+        // The relay has been up since before the pipeline; this is the point its control lanes can
+        // start answering for the robot's own media.
+        let _ = video_tx.send(Some(media.clone()));
+
         // One session per peer, each with its own connections to the services it talks to. Per
         // peer rather than shared, so one peer's minutes-long update cannot silence another's
         // telemetry — which is the same reason a session keeps one connection per lane.
@@ -567,9 +622,10 @@ fn main() -> ExitCode {
                 channel.inbound,
                 channel.outbound,
                 pool,
-                // Cloned per session: it carries the camera's intrinsics now, so it is no
-                // longer a `Copy` handful of integers.
-                video.clone(),
+                // Cloned per session: it carries the camera's intrinsics and a handle to the
+                // frame streamer. Always `Some` here — a datachannel exists because the pipeline
+                // handed over a consumer, so by definition there is media behind it.
+                Some(media.clone()),
             ));
         }
 

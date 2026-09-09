@@ -301,7 +301,32 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// [`RobotState::frames`] (camera, ToF, head IMU) is a few leaves — without carrying a copy of the
 /// kinematics, the same reason `frames` and `tof_beams` come from the robot. Both from the same FK
 /// `robot.look` uses. Additive: the `Vec`s are empty from a daemon predating it.
-pub const API_VERSION: u32 = 25;
+///
+/// # v26 — `system.logs`
+///
+/// The tail of one daemon's journal, over the wire. Until now the answer to "what did it say
+/// before it stopped" was `journalctl` over ssh, which needs a network the robot may not have and
+/// an address a phone has no way to reach — so the one question support asks first was the one
+/// question the wire could not answer.
+///
+/// Additive as a method, and narrow on purpose: a unit from a fixed list, a line count, and which
+/// boot. Not a `journalctl` command line — see [`LogsParams`] for why that boundary is where it is.
+///
+/// An older `configd` answers [`code::METHOD_NOT_FOUND`] naming the method, which is the designed
+/// skew and not a handshake refusal: a new `duckctl` against a robot on an older release reports
+/// that the robot is too old rather than failing obscurely.
+///
+/// # v27 — the pad's IMU, on the pad tap
+///
+/// Three more [`PadReport`] variants: a pad's inertial unit as a second evdev node beside the one
+/// that drives, its samples, and its going away. The "Pro Controller" Switch clones ship a
+/// six-axis IMU and the kernel's `hid-nintendo` exposes it as a separate accelerometer device
+/// under the same HID parent; an Xbox pad has none and a subscriber never sees the variants.
+///
+/// A new variant on a tagged enum is what a robotctl built before it cannot decode, which is the
+/// one reason this is a bump rather than a note: the tap is still `padd`'s own socket, and every
+/// other client is untouched.
+pub const API_VERSION: u32 = 27;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -676,6 +701,8 @@ pub mod method {
     pub const SYSTEM_INFO: &str = "system.info";
     /// What systemd says about each daemon, and which release each is running from.
     pub const SYSTEM_SERVICES: &str = "system.services";
+    /// The tail of one unit's journal, for a client with no shell on the robot.
+    pub const SYSTEM_LOGS: &str = "system.logs";
     /// Rename the robot. This is the name a phone sees.
     pub const SYSTEM_SET_NAME: &str = "system.setName";
     /// Reboot, cleanly, through systemd.
@@ -926,6 +953,8 @@ pub enum Call {
     // ── system.* ─────────────────────────────────────────────────────────────
     SystemInfo,
     SystemServices,
+    /// The tail of one unit's journal; see [`method::SYSTEM_LOGS`].
+    SystemLogs(LogsParams),
     SystemSetName(SetNameParams),
     SystemReboot,
     /// Read the pairing PIN.
@@ -1068,6 +1097,7 @@ impl Call {
             Call::NetForget(_) => method::NET_FORGET,
             Call::SystemInfo => method::SYSTEM_INFO,
             Call::SystemServices => method::SYSTEM_SERVICES,
+            Call::SystemLogs(_) => method::SYSTEM_LOGS,
             Call::SystemSetName(_) => method::SYSTEM_SET_NAME,
             Call::SystemReboot => method::SYSTEM_REBOOT,
             Call::SystemPairingPin => method::SYSTEM_PAIRING_PIN,
@@ -1232,6 +1262,7 @@ impl Call {
             | Call::NetForget(_)
             | Call::SystemInfo
             | Call::SystemServices
+            | Call::SystemLogs(_)
             | Call::SystemSetName(_)
             | Call::SystemReboot
             | Call::SystemPairingPin
@@ -1337,6 +1368,7 @@ impl Call {
             Call::RobotSubscribe(p) => encode(p),
             Call::NetConnect(p) => encode(p),
             Call::NetForget(p) => encode(p),
+            Call::SystemLogs(p) => encode(p),
             Call::SystemSetName(p) => encode(p),
             Call::SystemSetPairingPin(p) => encode(p),
             Call::SystemAuthenticate(p) => encode(p),
@@ -1444,6 +1476,7 @@ impl Call {
             method::NET_FORGET => Call::NetForget(decode(params)?),
             method::SYSTEM_INFO => Call::SystemInfo,
             method::SYSTEM_SERVICES => Call::SystemServices,
+            method::SYSTEM_LOGS => Call::SystemLogs(decode(params)?),
             method::SYSTEM_SET_NAME => Call::SystemSetName(decode(params)?),
             method::SYSTEM_REBOOT => Call::SystemReboot,
             method::SYSTEM_PAIRING_PIN => Call::SystemPairingPin,
@@ -1614,6 +1647,11 @@ pub mod test_support {
             }),
             Call::SystemInfo,
             Call::SystemServices,
+            Call::SystemLogs(LogsParams {
+                unit: "robotd".into(),
+                lines: 40,
+                boot: -1,
+            }),
             Call::SystemSetName(SetNameParams {
                 name: "duck-01".into(),
             }),
@@ -3785,6 +3823,63 @@ pub struct ServiceUnit {
     pub identity: Option<Identity>,
 }
 
+/// Which unit's journal to read, and how much of it. Parameters of [`Call::SystemLogs`].
+///
+/// **A unit name, not a filter expression.** The service picks from a fixed list and refuses
+/// anything else, because this call is reachable from a phone in radio range and `journalctl`
+/// arguments are not a language to hand such a peer. What that costs is `-g`, `--since` and
+/// several other things a person with a shell would reach for; what it buys is that the worst a
+/// client can ask for is the tail of a daemon this project ships.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogsParams {
+    /// `robotd` or `robotd.service` — the service resolves either. See `configd::logs` for the
+    /// units it will read.
+    pub unit: String,
+    /// How many lines from the end. Clamped to [`MAX_LOG_LINES`], and the byte budget below
+    /// usually binds first.
+    pub lines: usize,
+    /// Which boot: `0` is the current one, `-1` the one before it, and so on backwards.
+    ///
+    /// Negative rather than an index because that is the question — "what did it say before it
+    /// restarted" — and because it is `journalctl -b`'s own convention, so the answer to "which
+    /// boot did I just read" is the same number in both places.
+    pub boot: i32,
+}
+
+/// Ceiling on [`LogsParams::lines`], applied by the service rather than trusted from the caller.
+pub const MAX_LOG_LINES: usize = 500;
+
+/// Ceiling on the serialised `lines` array, in bytes.
+///
+/// **This exists because of the transport, and it is the binding limit in practice.** BLE
+/// reassembles a reply into one line, and the client's buffer for that is bounded — a peer that
+/// never sends a newline must not be able to grow it without limit. 48 KiB leaves the rest of a
+/// JSON-RPC envelope room inside a 64 KiB client buffer, and at a typical ATT MTU it is already
+/// several seconds on the air, which is the other reason not to raise it.
+///
+/// The service drops the *oldest* lines to fit and says it did, because the newest are the ones
+/// somebody asked for.
+pub const MAX_LOG_BYTES: usize = 48 * 1024;
+
+/// Answer to [`Call::SystemLogs`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogsResult {
+    /// The unit as systemd names it, so a caller that typed `robotd` sees what it actually read.
+    pub unit: String,
+    /// Oldest first, the way a journal reads. No trailing newlines.
+    ///
+    /// **A line in `-- … --` is the robot's, not the journal's.** `journalctl` uses that shape
+    /// for what it inserts rather than recorded (`-- Reboot --`, `-- No entries --`) and this
+    /// borrows it for the one thing a tail cannot otherwise show: `-- new robotd process, pid
+    /// 3227 --`, where the daemon restarted. A tail spanning an update carries two different
+    /// builds' output, and nothing in the lines themselves says where one ends.
+    pub lines: Vec<String>,
+    /// Lines were dropped from the front to fit [`MAX_LOG_BYTES`]. Not an error — it is what
+    /// asking for more than the radio can carry looks like, and a caller can say so.
+    pub truncated: bool,
+}
+
 /// Answer to [`Call::PadStatus`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PadStatusResult {
@@ -4058,6 +4153,81 @@ pub enum PadReport {
         /// usually an errno the operator wants verbatim.
         why: String,
     },
+    /// The pad has an inertial unit and its node is open. Sent on subscribing if one is already
+    /// being read, and again each time one appears — the same one code path as `Attached`.
+    ///
+    /// Independent of `Attached`: the IMU is a second evdev device with a life of its own, and a
+    /// pad without one simply never sends this. Everything in a [`PadImuSample`] is read against
+    /// the device here.
+    ImuAttached { device: Box<PadImuDevice> },
+    /// Inertial samples, as many as the kernel handed over in one read — see [`PadImuBatch`].
+    Imu(PadImuBatch),
+    /// The IMU node closed.
+    ImuDetached { why: String },
+}
+
+/// A pad's inertial unit, as the kernel describes it.
+///
+/// One device rather than six axes in [`PadInputDevice::axes`], because the kernel keeps them
+/// apart: an accelerometer node carries `INPUT_PROP_ACCELEROMETER` and its `ABS_X..Z` are metres
+/// per second squared, not a stick. Reading them as a stick is what gilrs would do, which is why
+/// `padd` drives from the other node and this one is only ever tapped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PadImuDevice {
+    /// As the kernel names it: "Nintendo Switch Pro Controller IMU".
+    pub name: String,
+    /// The event node being read.
+    pub node: String,
+    /// Raw units per **g** on the accelerometer axes, from the driver's `resolution`. 4096 on
+    /// `hid-nintendo`. Zero when the driver did not say, in which case the raw numbers are all a
+    /// reader has.
+    pub accel_per_g: i32,
+    /// Raw units per **degree per second** on the gyro axes. 14247 on `hid-nintendo`.
+    pub gyro_per_dps: i32,
+    /// The accelerometer's full scale, raw units, so a reader can tell a clipped sample.
+    pub accel_max: i32,
+    /// The gyro's full scale, raw units.
+    pub gyro_max: i32,
+}
+
+/// The inertial samples one read of the IMU node produced.
+///
+/// A batch rather than one sample per report, because of what a sample costs to send: at six
+/// hundred a second, one JSON line and one socket write each was measured at 6.6% of a core on the
+/// board (2026-09-09, `padd` with a subscriber, above its 1.6% idle). The kernel already groups
+/// them — the clone packs three samples into every HID packet — so the tap sends what one `read`
+/// returned, and the viewer takes them in order: measured at exactly three per batch, two hundred
+/// batches a second, and 4.4% of a core. Nothing is summarised: every sample is here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PadImuBatch {
+    /// In the order the kernel delivered them, oldest first. Never empty on the wire.
+    pub samples: Vec<PadImuSample>,
+    /// Batches this subscriber missed because its own socket was behind, since the last one it did
+    /// receive. Counted apart from [`PadFrame::socket_dropped`]: a dropped IMU batch says nothing
+    /// about the stick reports.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub socket_dropped: u64,
+}
+
+/// One inertial sample: everything the IMU node delivered between two `SYN_REPORT`s.
+///
+/// Raw kernel units, deliberately — the tap hands out what the device said and the resolution to
+/// read it with, and the conversion happens once, in the viewer. Six integers rather than a
+/// `PadFrame`'s event list because this arrives at several hundred a second and every byte is
+/// paid for on the board's CPU.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PadImuSample {
+    /// Samples since this IMU attached, counted by `padd`. A hole is a batch this subscriber
+    /// missed — [`PadImuBatch::socket_dropped`].
+    pub seq: u64,
+    /// The kernel's timestamp, microseconds since the epoch — the same clock and the same
+    /// caveats as [`PadFrame::at_us`].
+    pub at_us: u64,
+    /// `ABS_X`, `ABS_Y`, `ABS_Z`: acceleration, including gravity. At rest on a table the axis
+    /// pointing up reads about `+accel_per_g`.
+    pub accel: [i32; 3],
+    /// `ABS_RX`, `ABS_RY`, `ABS_RZ`: angular rate about the same three axes.
+    pub gyro: [i32; 3],
 }
 
 /// One report from the pad: everything the kernel delivered between two `SYN_REPORT`s.
@@ -4922,7 +5092,7 @@ mod tests {
     fn every_call_covers_every_variant() {
         assert_eq!(
             every_call().len(),
-            64,
+            65,
             "a Call variant was added or removed — update every_call() and this count"
         );
     }

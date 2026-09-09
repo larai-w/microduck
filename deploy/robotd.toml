@@ -292,8 +292,16 @@ mode = "walk"
 # The ToF theremin: a hand's distance in front of the beak becomes a note, and the mouth
 # opens with the pitch. Picked up with `robotctl theremin` (or `robot.theremin`) — this
 # switch is only whether it *can* be, so a duck with a known-bad ToF can refuse outright.
+#
+# **Off by default.** It is a party trick, and a duck nobody asked to play one has no
+# business holding a subscription to the depth stream; `robotctl theremin` on a duck that has
+# not opted in says so and names this key. Turning it on does not start anything by itself.
+#
+# Nothing else changes with it: `tofd` runs and polls the sensor either way, so
+# `robotctl monitor`'s ToF grid works the same whichever way this is set.
+#
 # Needs [audio] on: a theremin with no voice is a mouth opening for no reason.
-# enabled = true
+# enabled = false
 
 # tofd's depth stream.
 # socket = "/run/tofd/tof.sock"
@@ -414,3 +422,19 @@ mode = "walk"
 #
 # gcc is webrtcsink's own default, so this line changes nothing; it is here to be found.
 # congestion_control = "gcc"
+
+# ── Controller-IMU head control ─────────────────────────────────────────────────────────────
+#
+# Read by `padd`, not by `robotd`. Some pads carry an inertial unit — the "Pro Controller" Switch
+# clones do, an Xbox pad does not. With this on and such a pad connected, Y stops meaning "the
+# sticks pose the head" and means "the pad's tilt poses the head": the sticks keep driving, and
+# turning the pad in your hands turns the robot's head. Y again holds the head where it is, still
+# driving. A third press hands the head back to the pad from where the pad is *now* — its yaw is
+# a gyro's word alone and drifts, and re-centring on every re-entry is how you beat that without
+# a magnetometer. Off, or on a pad with no IMU, Y is what it always was.
+# [imu_head]
+# enabled = false
+
+# Head radians per pad radian. 1 follows the pad exactly; more turns a small wrist movement into
+# a large head movement. The head's own travel limit still applies.
+# gain = 1.0

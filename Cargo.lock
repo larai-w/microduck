@@ -1988,6 +1988,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hf-robot-account"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8f937783a058985f73be1663ef122f19682723c7504ff32ea10879c1ce9bef4"
+dependencies = [
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "hmac"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2704,6 +2719,8 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-video",
  "gstreamer-webrtc",
+ "hf-robot-account",
+ "image",
  "libc",
  "rand 0.10.2",
  "reqwest",
@@ -3219,6 +3236,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06503bb33f294c5f1ba484011e053bfa6ae227074bdb841e9863492dc5960d4b"
 
 [[package]]
+name = "pad-imu"
+version = "0.11.0"
+dependencies = [
+ "duck-ipc-proto",
+]
+
+[[package]]
 name = "padd"
 version = "0.11.0"
 dependencies = [
@@ -3227,9 +3251,11 @@ dependencies = [
  "evdev",
  "gilrs",
  "libc",
+ "pad-imu",
  "robotd-params",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3788,6 +3814,7 @@ dependencies = [
  "duck-ipc-proto",
  "kinematics",
  "libc",
+ "pad-imu",
  "ratatui",
  "robotd-params",
  "semver",
@@ -4762,8 +4789,12 @@ checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite 0.30.0",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -5020,6 +5051,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.10.2",
+ "rustls",
+ "rustls-pki-types",
  "sha1 0.11.0",
  "thiserror 2.0.19",
 ]
@@ -5095,6 +5128,7 @@ dependencies = [
  "duck-ipc-proto",
  "fs4",
  "futures-util",
+ "hf-robot-account",
  "humantime-serde",
  "libc",
  "minisign",
@@ -5319,6 +5353,24 @@ name = "webpki-root-certs"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.8",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf85cb06032201fa7c6f829d7db5a7e5aa45bcc0655327713065f6f0576731bf"
 dependencies = [
  "rustls-pki-types",
 ]

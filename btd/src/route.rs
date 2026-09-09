@@ -152,6 +152,25 @@ fn permits(call: &proto::Call) -> bool {
         // cannot report on this way is `btd` itself, which answering at all proves is running.
         SystemServices => true,
 
+        // The tail of one daemon's journal, and the next question after the line above: a unit
+        // reported as `failed` is a diagnosis nobody can act on without the reason it failed.
+        //
+        // Permitted because BLE is where the question is asked. A robot with no network cannot be
+        // reached by ssh, and that robot — one whose wifi never came up, whose `robotd` died on
+        // boot — is exactly the one whose journal somebody needs. Refusing here would mean the
+        // logs are readable over every transport except the one available when things are broken.
+        //
+        // Read-only, and bounded on the other side rather than trusted: `configd` picks the unit
+        // from a fixed list and refuses anything else, so this grants "the tail of a daemon this
+        // project ships", not `journalctl`. What a phone in the room learns is what that phone
+        // could already learn by watching the robot fail, in words it can put in a support ticket.
+        //
+        // The one thing worth naming as a cost: a journal line can carry more than a status. Ours
+        // are reviewed for that where it matters — `net.connect`'s passphrase is redacted by a
+        // hand-written `Debug` with a test pinning it (`proto::NetConnectParams`) — and this
+        // routing is the second reason that redaction is load-bearing rather than tidy.
+        SystemLogs(_) => true,
+
         // Rebooting is drastic but recoverable, and it is what an app offers when a robot is
         // confused — the alternative being "unplug it", which for a walking robot is worse.
         // Unlike `resetToGolden` it discards nothing.

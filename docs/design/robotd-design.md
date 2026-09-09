@@ -273,6 +273,15 @@ saying so:
   swapped in arrives at 250, so the check is what removes a whole class of "why is it slow on
   this robot". `shutdown = 52` is the error mask that latches on overload, overheating and
   input-voltage faults.
+- **A swapped-in servo is adopted, not configured by hand.** A new XL330 answers as ID 1 at
+  57 600 baud, and neither is used on this bus. So before the register check, `open_bus` pings
+  the fifteen expected IDs; if *exactly one* is silent, it looks for ID 1 — first at 1 Mbps,
+  then by reopening the port at 57 600 — writes it the missing ID and then the bus's baud rate,
+  reopens at 1 Mbps, runs the same register check on it, and reboots it. The reboot is what
+  clears the hardware-error alert the flash leaves set, which would otherwise hold torque off
+  until someone pulled the battery. A complete bus pays fifteen pings for this and nothing
+  else — the 57 600 probe never runs unless a servo is missing. Two missing servos are left
+  alone: there is no telling which one a fresh servo replaces, and the journal says so.
 - The position P gain is written with I and D at **zero**, the runtime's `--ki`/`--kd`
   defaults. These are RAM registers, so a power cycle restores the servo's factory values, and
   the factory D is not zero: left in place it damps the servo's internal PID and the robot runs

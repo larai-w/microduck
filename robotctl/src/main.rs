@@ -42,6 +42,7 @@ use robotd_params::Slot;
 
 mod configure;
 mod duck;
+mod imu_view;
 mod monitor;
 mod path_map;
 mod show;
@@ -823,7 +824,8 @@ enum PadCommand {
     /// the Xbox button, then press the small **Sync** button on the top edge, next to the USB-C
     /// port, until the Xbox light flashes quickly. Do NOT hold the Xbox button itself — that
     /// switches the controller off. On a DualSense: hold Create and PS together until the light bar
-    /// flashes.
+    /// flashes. On a Pro Controller (the Switch-style pads): hold the small Sync button on the top
+    /// edge until the player lights sweep.
     ///
     /// Then run this. No MAC address needed: the robot looks for a gamepad in pairing mode and
     /// takes the one it finds.
@@ -4013,7 +4015,8 @@ fn run_pad(socket: &Path, command: PadCommand) -> Result<(), Failure> {
         // someone who ran this needs to know *now* that they should be holding the button.
         eprintln!(
             "looking for a gamepad in pairing mode — on an Xbox pad, press the small Sync \
-             button on the top edge (not the Xbox button, which switches it off)"
+             button on the top edge (not the Xbox button, which switches it off); on a Pro \
+             Controller, hold its Sync button until the player lights sweep"
         );
     }
 

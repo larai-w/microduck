@@ -219,6 +219,11 @@ fn permits(call: &proto::Call) -> bool {
 
         // ── identity and status ─────────────────────────────────────────────
         SystemInfo | SystemServices | SystemSetName(_) => true,
+        // A daemon's journal tail. Read-only, and the question that follows a unit reported as
+        // `failed` — which `SystemServices` above can now say and could not explain. Permitted
+        // here for the reason `Show` is: a datachannel has room for a reply BLE has to trim,
+        // so the console is the transport where a whole screenful is cheap.
+        SystemLogs(_) => true,
         // Drops this session, and unlike an update leaves nothing mid-transition: the robot comes
         // back and the client reconnects. It is what you offer a confused robot.
         SystemReboot => true,

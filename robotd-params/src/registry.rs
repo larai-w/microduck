@@ -332,7 +332,7 @@ pub const REGISTRY: &[Entry] = &[
     feature(
         "theremin.enabled",
         Kind::Bool,
-        "The ToF theremin may be picked up at all (robot.theremin still starts it)",
+        "The ToF theremin may be picked up at all — off by default (robot.theremin starts it)",
     ),
     entry("theremin.socket", Kind::Text, "tofd's depth stream"),
     entry(
@@ -435,6 +435,19 @@ pub const REGISTRY: &[Entry] = &[
     feature("pad.lb", Kind::Text, "Skill on the left bumper"),
     feature("pad.rb", Kind::Text, "Skill on the right bumper"),
     feature("pad.dpad_down", Kind::Text, "Skill on D-pad down"),
+    // ── [imu_head] ───────────────────────────────────────────────────────────
+    //
+    // Controller-IMU head control. Read by `padd`, like `[pad]`.
+    feature(
+        "imu_head.enabled",
+        Kind::Bool,
+        "Y poses the head from the pad's own IMU (Pro Controller) — sticks keep driving; Y again holds, again re-centres",
+    ),
+    entry(
+        "imu_head.gain",
+        Kind::Float,
+        "Head radians per pad radian — 1 follows the pad exactly, more amplifies the wrist",
+    ),
 ];
 
 /// The registry entry for a key, if it is one.
@@ -630,6 +643,7 @@ mod tests {
                 "pad.lb",
                 "pad.rb",
                 "pad.dpad_down",
+                "imu_head.enabled",
             ]
         );
     }

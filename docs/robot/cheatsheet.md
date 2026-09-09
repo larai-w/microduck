@@ -90,7 +90,11 @@ this is relative motion and it drifts; it answers "did it walk in a circle" and 
 angles between degrees and radians; `t` opens the [ToF matrix](#the-tof-sensor-tofd); `d` toggles
 the robot view and `[` / `]` orbit it; `p` opens the pad's raw input stream — every evdev report
 from the gamepad, with the gaps between them, which is the only place a stalled radio is visible
-([pair a gamepad](pair-a-gamepad.md#when-it-drops-while-you-are-driving)). Angles are degrees on screen — joints, head and the yaw rate.
+([pair a gamepad](pair-a-gamepad.md#when-it-drops-while-you-are-driving)). A pad with an inertial
+unit — the Pro Controller clones have one, the Xbox does not — grows that block by a panel: a
+wireframe pad that tilts and turns with the one in your hands, its pitch, roll and drifting yaw,
+the raw acceleration and rates, and whether the gyro's rest bias has been learned yet (hold it
+still half a second). The yellow bar is the pad's front edge. Angles are degrees on screen — joints, head and the yaw rate.
 Redirected or piped it prints one line per tick instead, so `> run.log` and `| grep FALLEN`
 behave, and those numbers stay radians whatever the screen is set to. The joint vectors are in
 `--json`, which carries the whole state, one object per line:
@@ -430,6 +434,13 @@ corrupt each other's replies:
 sudo systemctl stop robotd && sudo /opt/robot/daemon/current/bin/robotd init && sudo systemctl start robotd
 ```
 
+**Replacing a motor** needs no configuration tool. Fit the new servo straight from the box (ID 1,
+57 600 baud), power the servos, and `robotd` — or `robotd init` — finds the one joint that no longer
+answers, flashes the new servo as that joint, sets its registers and reboots it. The journal says
+`factory-fresh servo on the bus; flashing it as the missing joint` and then `replacement servo
+adopted`. One at a time: with two joints missing it cannot tell which the new servo is for, waits,
+and says so.
+
 `init` works whether or not the robot has fallen — by default a fall is a *report* (visible in
 `robotctl monitor`), not a gate, matching the prototype. A board that sets `[safety] fall_limp`
 or `fall_recover` in `robotd.toml` arms the gate: there a fallen robot goes limp and refuses
@@ -469,7 +480,7 @@ mapping is the prototype's, so muscle memory carries over:
 | left stick | drive: forward/back and strafe · head: head yaw and pitch · body pose: up and crouch |
 | right stick | drive: turn · head: neck pitch and head roll · body pose: pitch and roll |
 | **Start** | first press: torque on and a 2 s ramp to the home pose, then hold. Second press: the policy drives. After that it toggles the policy |
-| **Y** / triangle | head mode: sticks pose the head (body holds still) |
+| **Y** / triangle | head mode: sticks pose the head (body holds still). With `[imu_head] enabled` and a pad that has an IMU: the pad's tilt poses the head and the sticks keep driving — see below |
 | **B** / circle | body-pose mode: sticks lean and crouch the standing robot |
 | **A** / cross | ground pick |
 | **X** / square | roulade — one forward roll; hold to chain rolls |
@@ -478,8 +489,22 @@ mapping is the prototype's, so muscle memory carries over:
 | **RT / LT** | mouth (either trigger) — RT also quacks; LT rides the "wheee" while held |
 | **DPad-Up**, held 3 s | switch drive mode, walk ⇄ roller |
 | **DPad-Right** | reboot every servo: the way back from a tripped overload without pulling the battery. Torque off, then Start |
-| **Select** | torque off (`robot.relax`): the emergency release. The robot drops, so hold it. Then Start stands it up again |
-| **Select**, held 2 s | power off (the press has already cut torque) |
+| **Select**, short press | torque off (`robot.relax`) **on release**: the emergency stop. The robot drops, so hold it. Then Start stands it up again |
+| **Select**, held 2 s | sit down, torque off, power off — the release afterwards does nothing more |
+
+**Drive the head with the pad itself.** A Pro Controller carries an IMU, and with
+
+```bash
+sudo robotctl configure      # Controller-IMU head control → enabled
+```
+
+Y changes meaning on such a pad: the first press hands the head to the pad — tilt it and the head
+tilts, turn it and the head turns — while the sticks go on driving the body. Press Y again and the
+head holds where it is, sticks still driving. Press it a third time and the pad drives the head again
+**from wherever the pad is now**: its yaw is a gyro's word alone and drifts, and re-centring on every
+re-entry is how you beat the drift without a magnetometer. `gain` in the same section is head
+radians per pad radian, 1 by default. On an Xbox pad, or with the switch off, Y is the stick head
+mode above. `padd` picks the change up within a second; no restart.
 
 There is no stop button: release the sticks and the robot stands, and `robotd`'s deadman stops it
 if `padd` dies. On a roller robot (`mode = "roller"` in `robotd.toml`) the sticks take the roller
@@ -658,6 +683,11 @@ The head's depth sensor becomes an instrument: a hand in front of the beak is th
 closer is higher — and the mouth opens with the note, wide at the top of the range. Runs
 until Ctrl-C and puts the instrument down on the way out. `--off` puts down one a client left
 up.
+
+**Off by default** — `[theremin] enabled` in `robotd.toml`, per duck, like the chorale above.
+`robotctl configure` is the way to set it, and it offers the `robotd` restart that picks it up;
+until then `robotctl theremin` refuses and names the key. Nothing else turns off with it: `tofd`
+runs regardless, so the depth grid below works on a duck that has never played a note.
 
 An explicit mode with nothing clever inside it: while it is up, the nearest return inside the
 playable band is the hand. Point the duck at open space and it is silent; point it at a wall
