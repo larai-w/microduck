@@ -28,6 +28,7 @@ pub mod producer;
 pub mod relay;
 pub mod route;
 pub mod session;
+mod snapshot;
 pub mod stream;
 /// Relay candidates, so a robot behind a router is reachable from a network that cannot punch a
 /// hole to it. `docs/design/remote-access-design.md` §6.

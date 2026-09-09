@@ -18,11 +18,12 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
+use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use duck_ipc_proto as proto;
-use serde::Serialize;
+
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -38,31 +39,39 @@ const GROUP: &str = "robot";
 /// anything approaching this is a client that has lost the plot.
 const MAX_REQUEST_BYTES: usize = 4096;
 
-#[derive(Debug, Serialize)]
-struct Header {
-    width: u32,
-    height: u32,
-    format: &'static str,
-    bytes: usize,
-    /// Wall time makes the snapshot joinable to a separately sampled robot state. It is not used
-    /// to pace capture, so an NTP adjustment cannot affect the pipeline.
-    captured_at_unix_us: u128,
-}
-
-/// Serve snapshots until the daemon exits.
-pub async fn serve(socket: &Path, frames: Frames) -> Result<()> {
-    if let Some(parent) = socket.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+/// Claim the socket without replacing a live listener or a non-socket file.
+pub async fn bind(socket: &Path) -> Result<(std::fs::File, UnixListener)> {
+    use std::os::unix::fs::FileTypeExt;
+    if let Some(parent) = socket.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
     }
-    // A stale socket from a daemon that did not shut down cleanly would refuse the bind. Removing
-    // it is safe because only this unit ever owns this path.
-    if socket.exists() {
-        std::fs::remove_file(socket)
-            .with_context(|| format!("removing stale {}", socket.display()))?;
-    }
-    let listener =
-        UnixListener::bind(socket).with_context(|| format!("binding {}", socket.display()))?;
+    // Keep the lock inode for the listener's lifetime, including the stale-socket probe.
+    let mut lock_path = socket.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    lock.try_lock()
+        .context("another mediad owns the frame socket")?;
+    let listener = match UnixListener::bind(socket) {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            if !std::fs::symlink_metadata(socket)?.file_type().is_socket() {
+                return Err(error.into());
+            }
+            match tokio::time::timeout(Duration::from_secs(1), UnixStream::connect(socket)).await {
+                Ok(Err(probe)) if probe.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    std::fs::remove_file(socket)?;
+                    UnixListener::bind(socket)?
+                }
+                _ => return Err(error.into()),
+            }
+        }
+        Err(error) => return Err(error.into()),
+    };
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(SOCKET_MODE))
         .with_context(|| format!("setting permissions on {}", socket.display()))?;
     if let Err(error) = give_to_group(socket, GROUP) {
@@ -80,14 +89,23 @@ pub async fn serve(socket: &Path, frames: Frames) -> Result<()> {
         "serving media.frame locally"
     );
 
+    Ok((lock, listener))
+}
+
+/// Bound both simultaneous clients and the lifetime of silent or slow clients.
+pub async fn serve(listener: UnixListener, frames: Frames) -> Result<()> {
+    let slots = Arc::new(tokio::sync::Semaphore::new(16));
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
+                let Ok(permit) = slots.clone().try_acquire_owned() else {
+                    continue;
+                };
                 let frames = frames.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = handle(stream, frames).await {
-                        tracing::debug!(error = %error, "media.frame client ended");
-                    }
+                    let _permit = permit;
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(5), handle(stream, frames)).await;
                 });
             }
             Err(error) => tracing::warn!(error = %error, "media.frame accept failed"),
@@ -101,81 +119,105 @@ async fn handle(stream: UnixStream, frames: Frames) -> Result<()> {
     // could make this process hold an arbitrarily long line first, which is the thing the cap is
     // for. One byte over the cap is read so that "too large" stays distinguishable from a request
     // that exactly fills it.
-    let mut reader = BufReader::new(read.take(MAX_REQUEST_BYTES as u64 + 1));
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
-    if line.len() > MAX_REQUEST_BYTES {
-        write_response(
-            &mut write,
-            proto::Response::err(
-                None,
-                proto::Error::new(proto::code::INVALID_PARAMS, "request is too large"),
-            ),
-        )
-        .await?;
-        return Ok(());
-    }
-    let request: proto::Request = match serde_json::from_str(line.trim()) {
-        Ok(request) => request,
-        Err(error) => {
+    let mut reader = BufReader::new(read);
+    loop {
+        let mut line = Vec::new();
+        let read = (&mut reader)
+            .take(MAX_REQUEST_BYTES as u64 + 1)
+            .read_until(b'\n', &mut line)
+            .await?;
+        if read == 0 {
+            return Ok(());
+        }
+        if line.len() > MAX_REQUEST_BYTES {
             write_response(
                 &mut write,
                 proto::Response::err(
                     None,
-                    proto::Error::new(proto::code::PARSE_ERROR, error.to_string()),
+                    proto::Error::new(proto::code::INVALID_PARAMS, "request is too large"),
                 ),
             )
             .await?;
             return Ok(());
         }
-    };
-    if request.method != proto::method::MEDIA_FRAME {
-        write_response(
-            &mut write,
-            proto::Response::err(
-                request.id,
-                proto::Error::new(
-                    proto::code::METHOD_NOT_FOUND,
-                    format!("{} is not served by mediad", request.method),
+        let request: proto::Request = match serde_json::from_slice(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                write_response(
+                    &mut write,
+                    proto::Response::err(
+                        None,
+                        proto::Error::new(proto::code::PARSE_ERROR, error.to_string()),
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        if request.method == proto::method::HELLO {
+            write_response(
+                &mut write,
+                proto::Response::ok(
+                    request.id,
+                    &proto::HelloResult {
+                        api_version: proto::API_VERSION,
+                        daemon_version: proto::semver::Version::parse(env!("CARGO_PKG_VERSION"))
+                            .ok(),
+                        revision: proto::build_info!().revision.map(str::to_owned),
+                    },
                 ),
-            ),
-        )
-        .await?;
+            )
+            .await?;
+            continue;
+        }
+        if request.method != proto::method::MEDIA_FRAME {
+            write_response(
+                &mut write,
+                proto::Response::err(
+                    request.id,
+                    proto::Error::new(
+                        proto::code::METHOD_NOT_FOUND,
+                        format!("{} is not served by mediad", request.method),
+                    ),
+                ),
+            )
+            .await?;
+            continue;
+        }
+        // `next_frame` registers the demand and parks on a condvar until the capture that answers it
+        // lands, so it cannot run on the runtime's thread.
+        let frame = tokio::task::spawn_blocking(move || frames.next_frame()).await?;
+        let Some(frame) = frame else {
+            write_response(
+                &mut write,
+                proto::Response::err(
+                    request.id,
+                    proto::Error::new(
+                        proto::code::INTERNAL_ERROR,
+                        "no frame arrived within the capture timeout",
+                    ),
+                ),
+            )
+            .await?;
+            return Ok(());
+        };
+        let captured_at_unix_us = frame
+            .captured_at
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros();
+        let header = proto::MediaFrameHeader {
+            width: frame.width,
+            height: frame.height,
+            format: frame.format.to_owned(),
+            bytes: frame.data.len(),
+            captured_at_unix_us,
+        };
+        write_response(&mut write, proto::Response::ok(request.id, &header)).await?;
+        write.write_all(&frame.data).await?;
+        write.flush().await?;
         return Ok(());
     }
-    // `next_frame` registers the demand and parks on a condvar until the capture that answers it
-    // lands, so it cannot run on the runtime's thread.
-    let frame = tokio::task::spawn_blocking(move || frames.next_frame()).await?;
-    let Some(frame) = frame else {
-        write_response(
-            &mut write,
-            proto::Response::err(
-                request.id,
-                proto::Error::new(
-                    proto::code::INTERNAL_ERROR,
-                    "no frame arrived within the capture timeout",
-                ),
-            ),
-        )
-        .await?;
-        return Ok(());
-    };
-    let captured_at_unix_us = frame
-        .captured_at
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    let header = Header {
-        width: frame.width,
-        height: frame.height,
-        format: frame.format,
-        bytes: frame.data.len(),
-        captured_at_unix_us,
-    };
-    write_response(&mut write, proto::Response::ok(request.id, &header)).await?;
-    write.write_all(&frame.data).await?;
-    write.flush().await?;
-    Ok(())
 }
 
 /// Hand the socket to `GROUP`. Mirrors `tof`'s stream and `padd`'s tap, including that a missing
@@ -224,6 +266,111 @@ mod tests {
     use super::*;
     use crate::pipeline::Frame;
     use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn hello_and_unknown_method_keep_the_connection_for_a_frame() {
+        let frames = Frames::default();
+        let producer = answer_once(
+            frames.clone(),
+            Frame {
+                width: 2,
+                height: 1,
+                format: "UYVY",
+                captured_at: UNIX_EPOCH,
+                data: vec![128, 16, 128, 235],
+            },
+        );
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(handle(server, frames));
+        client.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"unknown\"}\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"media.frame\"}\n").await.unwrap();
+        let mut reader = BufReader::new(client);
+        for id in 1..=3 {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let response: proto::Response = serde_json::from_str(&line).unwrap();
+            assert_eq!(response.id, Some(proto::Id::Number(id)));
+            if id == 1 {
+                assert_eq!(response.result.unwrap()["api_version"], proto::API_VERSION);
+            }
+            if id == 2 {
+                assert_eq!(response.error.unwrap().code, proto::code::METHOD_NOT_FOUND);
+            }
+        }
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(bytes, [128, 16, 128, 235]);
+        task.await.unwrap().unwrap();
+        producer.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_gets_a_parse_error() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(handle(server, Frames::default()));
+        client.write_all(&[255, b'\n']).await.unwrap();
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).await.unwrap();
+        let response: proto::Response = serde_json::from_str(&line).unwrap();
+        assert_eq!(response.error.unwrap().code, proto::code::PARSE_ERROR);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn socket_claim_preserves_files_and_live_listeners_but_recovers_stale_sockets() {
+        let dir = tempfile::tempdir().unwrap();
+        let regular = dir.path().join("regular");
+        std::fs::write(&regular, b"keep").unwrap();
+        assert!(bind(&regular).await.is_err());
+        assert_eq!(std::fs::read(&regular).unwrap(), b"keep");
+        let live = dir.path().join("live");
+        let listener = UnixListener::bind(&live).unwrap();
+        assert!(bind(&live).await.is_err());
+        assert!(UnixStream::connect(&live).await.is_ok());
+        drop(listener);
+        let (lock, listener) = bind(&live).await.unwrap();
+        assert!(bind(&live).await.is_err());
+        drop(listener);
+        drop(lock);
+        assert!(bind(&live).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn idle_clients_are_bounded_and_expire() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("media.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(serve(listener, Frames::default()));
+        let mut clients = Vec::new();
+        for _ in 0..16 {
+            let mut client = UnixStream::connect(&socket).await.unwrap();
+            client
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\"}\n")
+                .await
+                .unwrap();
+            let mut reader = BufReader::new(client);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(!line.is_empty());
+            clients.push(reader);
+        }
+        let mut excess = UnixStream::connect(&socket).await.unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), excess.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(6), clients[0].read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        server.abort();
+    }
 
     /// Stand in for the capture branch: wait for the demand this endpoint registers, then answer
     /// it once. Mirrors what `wire_frames` does on a buffer somebody asked for.
