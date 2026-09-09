@@ -17,10 +17,22 @@
 //! signalling server in this process, `mpph264enc` in front of it, and a `control` datachannel per
 //! peer wired to [`session::run`].
 
+/// What the camera's geometry is — the intrinsics a consumer needs to turn pixels into
+/// directions, and which sensor mode they belong to.
+pub mod camera;
 pub mod config;
+/// The account credential `updaterd` writes, read by the two things here that need it.
 pub mod producer;
+/// The outward connection to the rendezvous service — what makes a duck reachable from off its
+/// own LAN. `docs/design/remote-access-design.md` §3.
+pub mod relay;
 pub mod route;
 pub mod session;
+mod snapshot;
+pub mod stream;
+/// Relay candidates, so a robot behind a router is reachable from a network that cannot punch a
+/// hole to it. `docs/design/remote-access-design.md` §6.
+pub mod turn;
 pub mod upstream;
 pub mod web;
 
@@ -38,3 +50,9 @@ pub mod exposure;
 /// reads the same raw branch, in the same pixel format the pipeline names.
 #[cfg(target_os = "linux")]
 pub mod detect;
+
+/// The local, on-demand raw-frame endpoint. Linux only because it reads the pipeline's frame
+/// rendezvous, which is; the WebRTC control channel deliberately does not carry camera-sized
+/// replies. `npu-bringup.md` §"media.frame".
+#[cfg(target_os = "linux")]
+pub mod frame;

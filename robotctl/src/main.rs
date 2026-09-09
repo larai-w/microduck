@@ -42,6 +42,8 @@ use robotd_params::Slot;
 
 mod configure;
 mod duck;
+mod frame;
+mod imu_view;
 mod monitor;
 mod path_map;
 mod show;
@@ -106,6 +108,10 @@ struct Cli {
     #[arg(long, global = true, default_value = proto::socket::TOF)]
     tof_socket: PathBuf,
 
+    /// Local camera snapshot socket.
+    #[arg(long, global = true, default_value = proto::socket::MEDIA)]
+    media_socket: PathBuf,
+
     #[command(subcommand)]
     namespace: Namespace,
 }
@@ -114,6 +120,11 @@ struct Cli {
 /// `robotctl motors` later is additive rather than a restructure.
 #[derive(Subcommand, Debug)]
 enum Namespace {
+    /// Save one fresh raw UYVY frame; geometry is printed to stderr.
+    Frame {
+        #[arg(long, default_value = "frame.uyvy")]
+        output: PathBuf,
+    },
     /// Wifi. Served by `configd`, which drives NetworkManager.
     #[command(subcommand_required = true, arg_required_else_help = true)]
     Net {
@@ -421,6 +432,28 @@ enum RobotCommand {
         json: bool,
     },
 
+    /// Hand the robot to its policy, or take it back.
+    ///
+    /// **This is the gamepad's Start button**, and the difference from `init` is the whole point:
+    /// `init` powers the joints and position-ramps to the home pose with nothing balancing, while
+    /// this gives the robot to the policy, which then holds it up. A biped cannot stand by being
+    /// commanded to a pose — in simulation, where nobody is steadying it, `init` puts the robot on
+    /// the floor and `enable` stands it up from sitting.
+    ///
+    /// The console has had this button since it existed; the CLI did not, which is a gap nobody
+    /// noticed until a robot with no hands to hold it needed one.
+    Enable {
+        /// Take it back: the policy stops driving and the robot holds its pose.
+        #[arg(long)]
+        off: bool,
+        /// Flip whichever state it is in — what Start does, and what a client cannot get right by
+        /// remembering, because the robot's state moves without asking it.
+        #[arg(long, conflicts_with = "off")]
+        toggle: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Cut power to the joints.
     ///
     /// **The robot collapses** if nothing is holding it. This is what you want before picking it up
@@ -432,6 +465,19 @@ enum RobotCommand {
         /// Let go without asking.
         #[arg(long)]
         yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Reboot servos: every one of them, or only the ids given.
+    ///
+    /// The way back from a servo in hardware error (overload, overheating) without pulling the
+    /// battery. Torque goes off on every joint first, so hold the robot or have it down; the
+    /// rebooted servos come back with torque off and their gains restored on the next write.
+    /// Then `robot init` or Start.
+    RebootMotors {
+        /// Servo ids, space separated. None means all.
+        ids: Vec<u8>,
         #[arg(long)]
         json: bool,
     },
@@ -788,7 +834,8 @@ enum PadCommand {
     /// the Xbox button, then press the small **Sync** button on the top edge, next to the USB-C
     /// port, until the Xbox light flashes quickly. Do NOT hold the Xbox button itself — that
     /// switches the controller off. On a DualSense: hold Create and PS together until the light bar
-    /// flashes.
+    /// flashes. On a Pro Controller (the Switch-style pads): hold the small Sync button on the top
+    /// edge until the player lights sweep.
     ///
     /// Then run this. No MAC address needed: the robot looks for a gamepad in pairing mode and
     /// takes the one it finds.
@@ -2601,6 +2648,17 @@ fn run_robot(socket: &Path, command: RobotCommand) -> Result<(), Failure> {
     let (call, json) = match &command {
         RobotCommand::Init { json } => (proto::Call::RobotInit, *json),
         RobotCommand::Relax { json, .. } => (proto::Call::RobotRelax, *json),
+        RobotCommand::Enable { off, toggle, json } => (
+            proto::Call::RobotEnable(proto::EnableParams {
+                on: !*off,
+                toggle: *toggle,
+            }),
+            *json,
+        ),
+        RobotCommand::RebootMotors { ids, json } => (
+            proto::Call::RobotRebootMotors(proto::RebootMotorsParams { ids: ids.clone() }),
+            *json,
+        ),
         RobotCommand::Do { skill, json } => (
             proto::Call::RobotDo(proto::DoParams {
                 skill: skill.clone(),
@@ -2668,6 +2726,21 @@ fn run_robot(socket: &Path, command: RobotCommand) -> Result<(), Failure> {
     match command {
         RobotCommand::Init { .. } => println!("standing up — about two seconds to the home pose"),
         RobotCommand::Relax { .. } => println!("torque off"),
+        // The daemon's own `reason` names the state it ended in, which is the only trustworthy
+        // answer for a toggle — the client cannot know which way it went.
+        RobotCommand::Enable { .. } => println!(
+            "{}",
+            outcome
+                .reason
+                .as_deref()
+                .unwrap_or("the policy has the robot")
+        ),
+        RobotCommand::RebootMotors { ids, .. } if ids.is_empty() => {
+            println!("rebooting every servo, torque off — then `robot init` or Start")
+        }
+        RobotCommand::RebootMotors { ids, .. } => {
+            println!("rebooting servos {ids:?}, torque off — then `robot init` or Start")
+        }
         RobotCommand::Do { skill, .. } => println!("{skill:?} queued"),
         RobotCommand::Mode { .. } | RobotCommand::Look { .. } => unreachable!("answered above"),
     }
@@ -3952,7 +4025,8 @@ fn run_pad(socket: &Path, command: PadCommand) -> Result<(), Failure> {
         // someone who ran this needs to know *now* that they should be holding the button.
         eprintln!(
             "looking for a gamepad in pairing mode — on an Xbox pad, press the small Sync \
-             button on the top edge (not the Xbox button, which switches it off)"
+             button on the top edge (not the Xbox button, which switches it off); on a Pro \
+             Controller, hold its Sync button until the player lights sweep"
         );
     }
 
@@ -4338,6 +4412,7 @@ fn resolve_from_dir(dir: &std::path::Path) -> Result<String, Failure> {
 
 fn run(cli: Cli) -> Result<(), Failure> {
     let command = match cli.namespace {
+        Namespace::Frame { output } => return frame::run(&cli.media_socket, &output),
         Namespace::Health { json } => {
             return run_health(&cli.socket, &cli.robot_socket, &cli.config_socket, json);
         }

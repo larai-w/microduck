@@ -13,6 +13,9 @@ description = "Robot control core: model, bus, sensing"
 # both crates, so no binary gains a dependency from this edge.
 duck-ipc-proto = { path = "../duck-ipc-proto" }
 serde = { workspace = true }
+# The simulator link speaks newline-delimited JSON — see `sim` for why a packed struct shared
+# between two repositories in two languages is the worse trade.
+serde_json = { workspace = true }
 thiserror.workspace = true
 tracing.workspace = true
 # `load-dynamic` dlopens libonnxruntime at first use instead of linking it. Two

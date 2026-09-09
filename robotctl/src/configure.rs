@@ -58,7 +58,7 @@ fn unit_for(section: &str) -> &'static str {
         // `padd` reads the bindings, and `robotd` never sees them. Offering a robotd restart for
         // a button change would drop motor control — putting a standing robot on the floor — to
         // apply a setting it does not read.
-        "pad" => "padd",
+        "pad" | "imu_head" => "padd",
         _ => "robotd",
     }
 }

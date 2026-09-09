@@ -30,5 +30,17 @@ tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "sync",
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
+# The head IMU (`src/imu.rs`) reaches the BMI088 through `/dev/i2c-*`, which exists on no other
+# platform — the same rule `build.rs` already applies to the vendored ULDs, and for the same reason:
+# `cargo test --workspace` has to run on a developer's Mac. Off Linux `tofd` still builds, still
+# serves depth from `--fake` or `--sim`, and answers `head_imu.stream` with why it has no sensor.
+[target.'cfg(target_os = "linux")'.dependencies]
+# The BMI088 driver and its Madgwick fusion, ours because the crates.io ones stop at the raw
+# registers. Pinned to a tag: it is a second repository and a moving `main` is not a dependency.
+bmi088 = { git = "https://github.com/pollen-robotics/bmi088-rs", tag = "v0.1.1" }
+# `I2cdev`, the `embedded-hal` bus the driver is generic over. Linux-only by construction —
+# `i2cdev`'s `linux` module is the whole crate.
+linux-embedded-hal = "0.4"
+
 [build-dependencies]
 cc = "1"
