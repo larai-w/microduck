@@ -22,6 +22,10 @@ duck-ipc-proto = { path = "../duck-ipc-proto" }
 # through, so the schema, the defaults and the editor cannot drift from what is read here.
 robotd-params = { path = "../robotd-params" }
 anyhow = "1"
+# `getgrnam` and `chown`, to hand the frame socket to the `robot` group after binding — the same
+# thing `tof` and `padd` do with theirs. Mode 0660 alone would leave it `mediad:mediad`, and the
+# operator is only ever added to `robot`.
+libc = "0.2"
 # The detector itself: the letterbox+turn, the NPU binding, the ONNX fallback and the decoder.
 duck-detect = { path = "../duck-detect" }
 # The console's one route. Already in `Cargo.lock` — `updater` uses it for its test mirror — so it

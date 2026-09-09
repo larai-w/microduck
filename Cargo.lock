@@ -2704,6 +2704,7 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-video",
  "gstreamer-webrtc",
+ "libc",
  "rand 0.10.2",
  "reqwest",
  "robotd-params",

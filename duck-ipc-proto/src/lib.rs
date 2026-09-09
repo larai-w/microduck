@@ -359,6 +359,10 @@ pub mod socket {
     /// Under `/run/tofd/` for the same reason as the pad's: it is that unit's
     /// `RuntimeDirectory=`, so systemd removes the socket when the daemon stops.
     pub const TOF: &str = "/run/tofd/tof.sock";
+
+    /// `mediad`'s on-demand raw-frame endpoint. It is local-only: a raw camera frame is for a
+    /// recorder or perception process on the robot, not a multi-megabyte WebRTC control reply.
+    pub const MEDIA: &str = "/run/mediad/media.sock";
 }
 
 /// Where each daemon publishes what it is running: `/run/<service>/identity.json`.
@@ -415,6 +419,10 @@ pub const JOINT_NAMES: [&str; 15] = [
 /// with `update.*`. [`Call`] is the typed form.
 pub mod method {
     pub const HELLO: &str = "hello";
+
+    /// One raw camera frame. `mediad` answers the JSON-RPC header, followed immediately by the
+    /// bytes named in that header, on its local Unix socket.
+    pub const MEDIA_FRAME: &str = "media.frame";
 
     pub const CHECK: &str = "update.check";
     pub const APPLY: &str = "update.apply";

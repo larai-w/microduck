@@ -99,12 +99,16 @@ that as the price of perception, the two should be measured apart.
 
 ## What is still missing
 
-**Nothing on the robot can get a frame.** `mediad` has a raw NV12 tee branch that exists precisely
-for this — `architecture.md` §5.3 — but no IPC exposes it, which is also why capturing a dataset has
-to stop `mediad` to take the camera. Two ways forward, and they are not exclusive:
+`mediad` has a raw tee branch that exists precisely for this — `architecture.md` §5.3. Two ways
+forward, and they are not exclusive:
 
-- **`media.frame`**: a call that answers with one frame. Useful for far more than perception (a
-  snapshot in the console, a still for a bug report), and it makes capture stop fighting the daemon.
+- **`media.frame`** — **done.** A call that answers with one frame, on `mediad`'s own unix socket
+  (`/run/mediad/media.sock`), group-readable like the other observation sockets. Useful for far
+  more than perception (a snapshot in the console, a still for a bug report), and it means capturing
+  a dataset no longer has to stop `mediad` to take the camera. It answers a JSON-RPC header naming
+  a byte count, then those bytes: a raw frame is ~1.8 MiB, which is not something to base64 into a
+  control reply. It asks the tee for the *next* frame rather than taking a cached one, so a reader
+  cannot be handed the frame a stopped camera stopped on.
 - **The detector inside `mediad`**: subscribe to the raw branch, run the model at a few Hz, and
   publish detections on the state stream. This is where it ends up — perception next to the sensor,
   deriving features rather than shipping pixels — and it is what a behaviour would consume.
