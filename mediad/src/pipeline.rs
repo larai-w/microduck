@@ -1876,7 +1876,9 @@ fn wire_consumers(
         let leaving = consumers.clone();
         sink.connect("consumer-removed", false, move |_| {
             // `fetch_update` rather than `fetch_sub`, so a spurious removal cannot wrap the count
-            // around to four billion viewers.
+            // around to four billion viewers. Rust 1.99 renames it to `try_update`, but that
+            // spelling is unavailable at our Rust 1.89 minimum; retain the identical alias.
+            #[allow(deprecated)]
             let _ = leaving.fetch_update(
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
