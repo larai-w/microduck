@@ -1980,12 +1980,11 @@ fn open_control_channel(
     // aborts the process rather than unwinding, because this runs inside a C closure. Checked
     // first so an upstream change becomes a logged refusal to open a control channel, with the
     // video track still working.
-    for signal in ["create-data-channel"] {
-        if glib::subclass::signal::SignalId::lookup(signal, webrtcbin.type_()).is_none() {
-            return Err(anyhow!(
-                "webrtcbin has no {signal} signal; gst-plugins-rs may have changed it"
-            ));
-        }
+    let signal = "create-data-channel";
+    if glib::subclass::signal::SignalId::lookup(signal, webrtcbin.type_()).is_none() {
+        return Err(anyhow!(
+            "webrtcbin has no {signal} signal; gst-plugins-rs may have changed it"
+        ));
     }
     // Reliable and ordered, which is the default and is what §2 wants for `control` —
     // `remote-webrtc.md` §6 covers why the first version opens only this one.

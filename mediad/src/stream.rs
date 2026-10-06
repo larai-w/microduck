@@ -731,6 +731,8 @@ mod tests {
 
     impl Saturating for std::sync::atomic::AtomicU32 {
         fn fetch_saturating_sub(&self) -> bool {
+            // `try_update` requires Rust 1.99; keep its alias for the Rust 1.89 minimum.
+            #[allow(deprecated)]
             self.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 Some(n.saturating_sub(1))
             })
