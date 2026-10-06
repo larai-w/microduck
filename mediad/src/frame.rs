@@ -450,13 +450,18 @@ mod tests {
     async fn a_request_without_a_newline_is_still_bounded() {
         let (mut client, server) = UnixStream::pair().unwrap();
         let task = tokio::spawn(handle(server, Frames::default(), 0));
+        // Send only the byte that crosses the limit: the server may close before any
+        // further bytes are written. Keep the write side open to prove refusal needs no EOF.
         client
-            .write_all("y".repeat(MAX_REQUEST_BYTES * 4).as_bytes())
+            .write_all("y".repeat(MAX_REQUEST_BYTES + 1).as_bytes())
             .await
             .unwrap();
-        client.shutdown().await.unwrap();
         let mut text = String::new();
-        BufReader::new(client).read_line(&mut text).await.unwrap();
+        let mut reader = BufReader::new(client);
+        tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut text))
+            .await
+            .expect("an oversized request must be refused without a newline or EOF")
+            .unwrap();
         task.await.unwrap().unwrap();
         let response: proto::Response = serde_json::from_str(text.trim()).unwrap();
         assert_eq!(response.error.unwrap().code, proto::code::INVALID_PARAMS);
